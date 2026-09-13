@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+
+RESET='\e[0m'
+LABEL='\e[38;2;255;121;174m'
+VALUE='\e[38;2;240;231;234m'
+
+# ─────────────────────────────────────────────
+# NAZAHIME logo
+# ─────────────────────────────────────────────
+
+logo=(
+'█▄░█ ▄▀█ ▀█ ▄▀█ █░█ █ █▀▄▀█ █▀▀'
+'█░▀█ █▀█ █▄ █▀█ █▀█ █ █░▀░█ ██▄'
+)
+
+start_r=168
+start_g=117
+start_b=209
+
+end_r=255
+end_g=121
+end_b=174
+
+gradient_line() {
+    local text="$1"
+    local len=${#text}
+
+    for ((i=0; i<len; i++)); do
+        char="${text:i:1}"
+
+        r=$(( start_r + (end_r-start_r)*i/(len-1) ))
+        g=$(( start_g + (end_g-start_g)*i/(len-1) ))
+        b=$(( start_b + (end_b-start_b)*i/(len-1) ))
+
+        printf '\e[38;2;%d;%d;%dm%s' "$r" "$g" "$b" "$char"
+    done
+
+    printf '%b\n' "$RESET"
+}
+
+for line in "${logo[@]}"; do
+    gradient_line "$line"
+done
+
+echo
+
+# ─────────────────────────────────────────────
+# System information
+# ─────────────────────────────────────────────
+
+OS_NAME="$(. /etc/os-release; printf '%s' "$PRETTY_NAME")"
+ARCH="$(uname -m)"
+KERNEL="$(uname -sr)"
+
+GNOME_VERSION="$(gnome-shell --version 2>/dev/null | awk '{print $3}')"
+
+DPKG_COUNT="$(dpkg-query -f '${binary:Package}\n' -W 2>/dev/null | wc -l)"
+FLATPAK_COUNT="$(flatpak list --app --columns=application 2>/dev/null | wc -l)"
+
+SHELL_NAME="$(basename "$SHELL")"
+BASH_VERSION_SHORT="${BASH_VERSION%%(*}"
+
+TERM_VERSION="$(gnome-terminal --version 2>/dev/null | sed 's/GNOME Terminal //')"
+
+SESSION_TYPE="${XDG_SESSION_TYPE^}"
+
+GTK_THEME="$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null | tr -d "'")"
+ICON_THEME="$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'")"
+FONT_NAME="$(gsettings get org.gnome.desktop.interface font-name 2>/dev/null | tr -d "'")"
+
+CPU_MODEL="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
+CPU_COUNT="$(nproc)"
+CPU_MAX_MHZ="$(lscpu | awk -F: '/CPU max MHz/ {gsub(/^[ \t]+/, "", $2); printf "%.2f", $2/1000}')"
+
+# Fallback if CPU max MHz isn't exposed by lscpu
+if [[ -z "$CPU_MAX_MHZ" ]]; then
+    CPU_MAX_MHZ="3.50"
+fi
+
+# Memory
+read -r MEM_TOTAL MEM_AVAILABLE < <(
+    awk '
+        /MemTotal:/     {total=$2}
+        /MemAvailable:/ {available=$2}
+        END {print total, available}
+    ' /proc/meminfo
+)
+
+MEM_USED=$((MEM_TOTAL - MEM_AVAILABLE))
+
+MEM_TOTAL_GIB="$(awk -v x="$MEM_TOTAL" 'BEGIN {printf "%.2f", x/1048576}')"
+MEM_USED_GIB="$(awk -v x="$MEM_USED" 'BEGIN {printf "%.2f", x/1048576}')"
+MEM_PERCENT=$((MEM_USED * 100 / MEM_TOTAL))
+
+# Disks
+disk_info() {
+    local mount="$1"
+
+    df -B1 --output=size,used,pcent,fstype "$mount" 2>/dev/null |
+        tail -1 |
+        awk '{
+            printf "%.2f GiB / %.2f GiB (%s) - %s",
+            $2/1073741824,
+            $1/1073741824,
+            $3,
+            $4
+        }'
+}
+
+ROOT_DISK="$(disk_info /)"
+HOME_DISK="$(disk_info /home)"
+
+# Batteries
+battery_info() {
+    local bat="$1"
+    local path="/sys/class/power_supply/$bat"
+
+    [[ -d "$path" ]] || return
+
+    local capacity status
+    capacity="$(cat "$path/capacity" 2>/dev/null)"
+    status="$(cat "$path/status" 2>/dev/null)"
+
+    if [[ "$status" == "Charging" || "$status" == "Full" ]]; then
+        status="AC Connected"
+    fi
+
+    printf '%s%% [%s]' "$capacity" "$status"
+}
+
+# ─────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────
+
+info() {
+    printf "%b%-12s%b %s\n" "$LABEL" "$1:" "$VALUE" "$2"
+}
+
+info "OS" "$OS_NAME $ARCH"
+info "Kernel" "$KERNEL"
+info "DE" "GNOME $GNOME_VERSION"
+info "Packages" "$DPKG_COUNT (dpkg), $FLATPAK_COUNT (flatpak)"
+info "Shell" "$SHELL_NAME $BASH_VERSION_SHORT"
+info "Terminal" "GNOME Terminal $TERM_VERSION"
+info "WM" "Mutter ($SESSION_TYPE)"
+info "WM Theme" "$GTK_THEME"
+info "Icons" "$ICON_THEME [GTK2/3/4]"
+info "Font" "$FONT_NAME [GTK2/3/4]"
+info "CPU" "$CPU_MODEL ($CPU_COUNT) @ ${CPU_MAX_MHZ} GHz"
+info "GPU 1" "NVIDIA Quadro M600M [Discrete]"
+info "GPU 2" "Intel HD Graphics 530 @ 0.95 GHz [Integrated]"
+info "Memory" "$MEM_USED_GIB GiB / $MEM_TOTAL_GIB GiB ($MEM_PERCENT%)"
+info "Disk (/)" "$ROOT_DISK"
+info "Disk (/home)" "$HOME_DISK"
+
+for bat in /sys/class/power_supply/BAT*; do
+    [[ -d "$bat" ]] || continue
+
+    BAT_NAME="$(basename "$bat")"
+    MODEL="$(cat "$bat/model_name" 2>/dev/null)"
+
+    [[ -z "$MODEL" ]] && MODEL="$BAT_NAME"
+
+    info "Battery ($MODEL)" "$(battery_info "$BAT_NAME")"
+done
+
+printf '%b' "$RESET"
